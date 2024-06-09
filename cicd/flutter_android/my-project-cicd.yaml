@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: my-project CI/CD Pipeline with SDK caching and Flutter 3.13.4
+
+Resources:
+  # S3バケットを作成
+  ProjectS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: my-project-s3
+      VersioningConfiguration:
+        Status: Enabled # バージョニングを有効にする
+
+  # CodeCommitリポジトリを作成
+  ProjectCodeCommitRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: my-project-repo
+      RepositoryDescription: my-projectプロジェクト用リポジトリ
+
+  # CodeBuildプロジェクトを作成
+  ProjectCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: my-project-build
+      Artifacts:
+        Type: S3
+        Location: !Ref ProjectS3Bucket
+        Path: flutter-builds
+        Name: app-release.apk
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: ANDROID_HOME
+            Value: /usr/local/android-sdk
+          - Name: FLUTTER_SDK
+            Value: /opt/flutter
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      SourceVersion: develop
+      TimeoutInMinutes: 60
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Sub /aws/codebuild/${AWS::StackName}-log-group
+      Source:
+        Type: CODECOMMIT
+        Location: !Sub https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/my-project-repo
+        BuildSpec: |-
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - apt-get update
+                - apt-get install -y openjdk-11-jdk
+                # Flutter SDKがキャッシュされているか確認し、キャッシュされていない場合はダウンロードして展開
+                - if [ ! -d "$FLUTTER_SDK/flutter" ]; then
+                    mkdir -p $FLUTTER_SDK
+                    aws s3 cp s3://my-project-s3/flutter/flutter_3.13.4.tar.xz $FLUTTER_SDK/flutter.tar.xz || curl -s https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.13.4-stable.tar.xz -o $FLUTTER_SDK/flutter.tar.xz
+                    tar -xf $FLUTTER_SDK/flutter.tar.xz -C $FLUTTER_SDK
+                    rm $FLUTTER_SDK/flutter.tar.xz
+                    aws s3 cp $FLUTTER_SDK/flutter.tar.xz s3://my-project-s3/flutter/flutter_3.13.4.tar.xz
+                  fi
+                # Android SDKがキャッシュされているか確認し、キャッシュされていない場合はダウンロードして展開
+                - if [ ! -d "/usr/local/android-sdk/platforms/android-30" ]; then
+                    curl -s https://dl.google.com/android/repository/commandlinetools-linux-7583922_latest.zip -o cmdline-tools.zip
+                    unzip cmdline-tools.zip -d /usr/local/android-sdk/cmdline-tools
+                    yes | /usr/local/android-sdk/cmdline-tools/tools/bin/sdkmanager --licenses
+                    /usr/local/android-sdk/cmdline-tools/tools/bin/sdkmanager "platform-tools" "platforms;android-30" "build-tools;30.0.3"
+                    aws s3 sync /usr/local/android-sdk/ s3://my-project-s3/android-sdk/
+                  else
+                    aws s3 sync s3://my-project-s3/android-sdk/ /usr/local/android-sdk/
+                  fi
+                - if [ ! -d "/root/.gradle/wrapper" ]; then
+                    mkdir -p /root/.gradle/wrapper
+                    aws s3 sync s3://my-project-s3/gradle/wrapper /root/.gradle/wrapper
+                  fi
+                - if [ ! -d "/root/.gradle/caches" ]; then
+                    mkdir -p /root/.gradle/caches
+                    aws s3 sync s3://my-project-s3/gradle/caches /root/.gradle/caches
+                  fi
+                - export PATH="$FLUTTER_SDK/flutter/bin:$PATH"
+            pre_build:
+              commands:
+                # Flutterの状態を確認
+                - flutter doctor
+                # Dartパッケージのキャッシュディレクトリを設定し、パッケージを取得
+                - export PUB_CACHE="/root/.pub-cache"
+                - flutter pub get
+            build:
+              commands:
+                # リリース用のAPKをビルド
+                - flutter build apk --release
+            post_build:
+              commands:
+                # ビルド後のキャッシュをS3にアップロード
+                - aws s3 sync /root/.pub-cache s3://my-project-s3/dart-cache/
+                - aws s3 sync /root/.gradle/wrapper s3://my-project-s3/gradle/wrapper/
+                - aws s3 sync /root/.gradle/caches s3://my-project-s3/gradle/caches/
+                - aws s3 sync /usr/local/android-sdk/ s3://my-project-s3/android-sdk/
+          artifacts:
+            files:
+              # 成果物としてリリースAPKを指定
+              - app-release.apk
+            discard-paths: yes
+            base-directory: build/app/outputs/flutter-apk
+          cache:
+            paths:
+              - /root/.pub-cache/**
+              - /usr/local/android-sdk/**
+              - /root/.gradle/caches/**
+              - /root/.gradle/wrapper/**
+
+  # CodeBuild用のIAMロールを作成
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:* # ログ操作を許可
+                  - s3:* # S3操作を許可
+                  - codebuild:* # CodeBuild操作を許可
+                Resource: "*"
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelinePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:* # S3操作を許可
+                  - codecommit:* # CodeCommit操作を許可
+                  - codebuild:* # CodeBuild操作を許可
+                Resource: "*"
+
+  # CodePipelineを作成
+  ProjectCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: my-project-pipeline
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ProjectS3Bucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                RepositoryName: my-project-repo
+                BranchName: release
+              OutputArtifacts:
+                - Name: SourceArtifact
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref ProjectCodeBuildProject
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+        - Name: Deploy
+          Actions:
+            - Name: DeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: S3
+                Version: 1
+              Configuration:
+                BucketName: !Ref ProjectS3Bucket
+                Extract: false
+              InputArtifacts:
+                - Name: BuildArtifact

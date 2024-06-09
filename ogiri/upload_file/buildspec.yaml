@@ -1,0 +1,63 @@
+version: 0.2
+phases:
+  install:
+    commands:
+      - apt-get update
+      - apt-get install -y openjdk-11-jdk
+      # Flutter SDKがキャッシュされているか確認し、キャッシュされていない場合はダウンロードして展開
+      - if [ ! -d "$FLUTTER_SDK/flutter" ]; then
+        mkdir -p $FLUTTER_SDK
+        aws s3 cp s3://ogiri-ai-builds/flutter/flutter_3.13.4.tar.xz $FLUTTER_SDK/flutter.tar.xz || curl -s https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.13.4-stable.tar.xz -o $FLUTTER_SDK/flutter.tar.xz
+        tar -xf $FLUTTER_SDK/flutter.tar.xz -C $FLUTTER_SDK
+        rm $FLUTTER_SDK/flutter.tar.xz
+        aws s3 cp $FLUTTER_SDK/flutter.tar.xz s3://ogiri-ai-builds/flutter/flutter_3.13.4.tar.xz
+        fi
+      # Android SDKがキャッシュされているか確認し、キャッシュされていない場合はダウンロードして展開
+      - if [ ! -d "/usr/local/android-sdk/platforms/android-30" ]; then
+        curl -s https://dl.google.com/android/repository/commandlinetools-linux-7583922_latest.zip -o cmdline-tools.zip
+        unzip cmdline-tools.zip -d /usr/local/android-sdk/cmdline-tools
+        yes | /usr/local/android-sdk/cmdline-tools/tools/bin/sdkmanager --licenses
+        /usr/local/android-sdk/cmdline-tools/tools/bin/sdkmanager "platform-tools" "platforms;android-30" "build-tools;30.0.3"
+        aws s3 sync /usr/local/android-sdk/ s3://ogiri-ai-builds/android-sdk/
+        else
+        aws s3 sync s3://ogiri-ai-builds/android-sdk/ /usr/local/android-sdk/
+        fi
+      - if [ ! -d "/root/.gradle/wrapper" ]; then
+        mkdir -p /root/.gradle/wrapper
+        aws s3 sync s3://ogiri-ai-builds/gradle/wrapper /root/.gradle/wrapper
+        fi
+      - if [ ! -d "/root/.gradle/caches" ]; then
+        mkdir -p /root/.gradle/caches
+        aws s3 sync s3://ogiri-ai-builds/gradle/caches /root/.gradle/caches
+        fi
+      - export PATH="$FLUTTER_SDK/flutter/bin:$PATH"
+  pre_build:
+    commands:
+      # Flutterの状態を確認
+      - flutter doctor
+      # Dartパッケージのキャッシュディレクトリを設定し、パッケージを取得
+      - export PUB_CACHE="/root/.pub-cache"
+      - flutter pub get
+  build:
+    commands:
+      # リリース用のAPKをビルド
+      - flutter build apk --release
+  post_build:
+    commands:
+      # ビルド後のキャッシュをS3にアップロード
+      - aws s3 sync /root/.pub-cache s3://ogiri-ai-builds/dart-cache/
+      - aws s3 sync /root/.gradle/wrapper s3://ogiri-ai-builds/gradle/wrapper/
+      - aws s3 sync /root/.gradle/caches s3://ogiri-ai-builds/gradle/caches/
+      - aws s3 sync /usr/local/android-sdk/ s3://ogiri-ai-builds/android-sdk/
+artifacts:
+  files:
+    # 成果物としてリリースAPKを指定
+    - app-release.apk
+  discard-paths: yes
+  base-directory: build/app/outputs/flutter-apk
+cache:
+  paths:
+    - /root/.pub-cache/**
+    - /usr/local/android-sdk/**
+    - /root/.gradle/caches/**
+    - /root/.gradle/wrapper/**
