@@ -113,8 +113,7 @@ def predict_fn(input_data, model):
     # 推論を実行
     input_ids = decoder.tokenizer.encode("大喜利:", return_tensors="pt").to(device)
     outputs = decoder.model.generate(
-        input_ids=input_ids,
-        inputs_embeds=combined_features,
+        inputs_embeds=combined_features.unsqueeze(0),
         max_length=50,
         num_return_sequences=1,
     )

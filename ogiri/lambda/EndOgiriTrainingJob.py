@@ -28,10 +28,10 @@ def lambda_handler(event, context):
         sagemaker.create_model(
             ModelName=model_name,
             PrimaryContainer={
-                "Image": "763104351884.dkr.ecr.us-west-2.amazonaws.com/pytorch-inference:1.6.0-cpu-py36-ubuntu16.04",
+                "Image": "763104351884.dkr.ecr.ap-northeast-1.amazonaws.com/pytorch-inference:2.0.0-gpu-py310",
                 "ModelDataUrl": f"s3://ogiri-training-data-bucket/output/{training_job_name}/output/model.tar.gz",
                 "Environment": {
-                    "SAGEMAKER_SUBMIT_DIRECTORY": "s3://ogiri-training-data-bucket/training-code/"
+                    "SAGEMAKER_SUBMIT_DIRECTORY": "s3://ogiri-training-data-bucket/training-code/training_code.tar.gz"
                 },
                 "entry_point": "inference.py",
             },

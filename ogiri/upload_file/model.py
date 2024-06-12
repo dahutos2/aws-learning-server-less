@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import torchvision.models as models
+from torchvision import models
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
@@ -9,7 +9,7 @@ class EncoderCNN(nn.Module):
     def __init__(self, embed_size):
         super(EncoderCNN, self).__init__()
         # 事前学習済みのResNet50モデルを読み込む
-        resnet = models.resnet50(pretrained=True)
+        resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         # 最後の全結合層を除去
         modules = list(resnet.children())[:-1]
         self.resnet = nn.Sequential(*modules)
@@ -39,10 +39,8 @@ class DecoderRNN(nn.Module):
         self.tokenizer.do_lower_case = True
         self.model = AutoModelForCausalLM.from_pretrained("rinna/japanese-gpt2-medium")
 
-        # 画像特徴、ラベル、信頼度、テキストの結合
-        self.fc = nn.Linear(
-            embed_size * 2, embed_size
-        )  # 画像特徴、ラベル、信頼度、テキストの結合
+        # 画像特徴、ラベル、信頼度の結合
+        self.fc = nn.Linear(embed_size * 2, embed_size)
 
     def forward(self, features, captions, label_texts, confidences):
         # 文字列をエンコード

@@ -122,7 +122,7 @@ def lambda_handler(event, context):
                 "sagemaker_submit_directory": "s3://ogiri-training-data-bucket/training-code/training_code.tar.gz",
             },
             AlgorithmSpecification={
-                "TrainingImage": "763104351884.dkr.ecr.ap-northeast-1.amazonaws.com/pytorch-training:1.6.0-cpu-py36-ubuntu16.04",
+                "TrainingImage": "763104351884.dkr.ecr.ap-northeast-1.amazonaws.com/pytorch-training:2.0.0-gpu-py310",
                 "MetricDefinitions": [
                     {"Name": "validation:error", "Regex": "validation:error=(.*)"}
                 ],
