@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
-from transformers import GPT2Tokenizer, GPT2LMHeadModel
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
 # 画像特徴抽出モデル（ResNet）
@@ -33,58 +33,64 @@ class DecoderRNN(nn.Module):
     def __init__(self, embed_size):
         super(DecoderRNN, self).__init__()
         # GPT-2トークナイザとモデルの読み込み
-        self.tokenizer = GPT2Tokenizer.from_pretrained("rinna/japanese-gpt2-medium")
-        self.model = GPT2LMHeadModel.from_pretrained("rinna/japanese-gpt2-medium")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "rinna/japanese-gpt2-medium", use_fast=False
+        )
+        self.tokenizer.do_lower_case = True
+        self.model = AutoModelForCausalLM.from_pretrained("rinna/japanese-gpt2-medium")
+
+        # 画像特徴、ラベル、信頼度、テキストの結合
         self.fc = nn.Linear(
             embed_size * 2, embed_size
         )  # 画像特徴、ラベル、信頼度、テキストの結合
 
-    def forward(self, features, captions, label_texts, confidences, detected_text):
+    def forward(self, features, captions, label_texts, confidences):
         # 文字列をエンコード
-        label_indices = self.tokenizer.encode(
-            " ".join(label_texts), add_special_tokens=False
-        )
-        text_indices = self.tokenizer.encode(detected_text, add_special_tokens=False)
+        label_indices_list = [
+            self.tokenizer.encode(" ".join(label), add_special_tokens=False)
+            for label in label_texts
+        ]
 
         # キャプションをトークナイズし、テンソル形式に変換
         inputs = self.tokenizer(
             captions, return_tensors="pt", padding=True, truncation=True
         )
         # ラベルのインデックスをトークンの埋め込みに変換し、デバイスに移動
-        label_embeddings = self.model.transformer.wte(
-            torch.tensor(label_indices).to(features.device)
-        )
+        label_embeddings = [
+            self.model.transformer.wte(torch.tensor(indices).to(features.device))
+            for indices in label_indices_list
+        ]
         # 信頼度をテンソルに変換し、ラベル埋め込みのサイズに拡張
         confidences = (
             torch.tensor(confidences)
             .to(features.device)
             .unsqueeze(1)
-            .expand(-1, label_embeddings.size(1))
+            .expand(-1, label_embeddings[0].size(1))
         )
-        # 検出されたテキストのインデックスをトークンの埋め込みに変換し、デバイスに移動
-        text_embeddings = self.model.transformer.wte(
-            torch.tensor(text_indices).to(features.device)
-        )
-        # 画像特徴、ラベル埋め込み、信頼度、テキスト埋め込みを結合
-        combined_features = torch.cat(
-            (features, label_embeddings, confidences, text_embeddings), dim=1
-        )
+
+        # 画像特徴、ラベル埋め込み、信頼度を結合
+        combined_features_list = [
+            torch.cat((features, label_emb, confidences), dim=1)
+            for label_emb in label_embeddings
+        ]
+        combined_features = torch.stack(combined_features_list)
 
         # 結合された特徴を全結合層に入力
         combined_features = self.fc(combined_features)
+
         # トークナイズされたキャプションを入力にして、モデルで前向き伝播を実行
         outputs = self.model(
             inputs_embeds=combined_features, labels=inputs["input_ids"]
         )
+
         # 損失と出力ロジットを返す
         return outputs.loss, outputs.logits
 
-    def sample(self, features, label_texts, confidences, detected_text):
+    def sample(self, features, label_texts, confidences):
         # 文字列をエンコード
         label_indices = self.tokenizer.encode(
             " ".join(label_texts), add_special_tokens=False
         )
-        text_indices = self.tokenizer.encode(detected_text, add_special_tokens=False)
 
         # 特徴から大喜利のテキストを生成
         # 初期シーケンスとして「大喜利:」をエンコードし、テンソル形式に変換してデバイスに移動
@@ -102,14 +108,9 @@ class DecoderRNN(nn.Module):
             .unsqueeze(1)
             .expand(-1, label_embeddings.size(1))
         )
-        # 検出されたテキストのインデックスをトークンの埋め込みに変換し、デバイスに移動
-        text_embeddings = self.model.transformer.wte(
-            torch.tensor(text_indices).to(features.device)
-        )
-        # 画像特徴、ラベル埋め込み、信頼度、テキスト埋め込みを結合
-        combined_features = torch.cat(
-            (features, label_embeddings, confidences, text_embeddings), dim=1
-        )
+
+        # 画像特徴、ラベル埋め込み、信頼度を結合
+        combined_features = torch.cat((features, label_embeddings, confidences), dim=1)
 
         # 結合された特徴を全結合層に入力
         combined_features = self.fc(combined_features)

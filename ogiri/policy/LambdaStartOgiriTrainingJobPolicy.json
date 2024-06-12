@@ -53,6 +53,16 @@
             "Resource": [
                 "arn:aws:logs:ap-northeast-1:765231401377:log-group:/aws/lambda/*"
             ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "events:PutRule",
+                "events:PutTargets"
+            ],
+            "Resource": [
+                "arn:aws:events:ap-northeast-1:765231401377:rule/OgiriTrainingJobCompletionRule-*"
+            ]
         }
     ]
 }

@@ -56,9 +56,8 @@ def input_fn(request_body, request_content_type):
         image_data = base64.b64decode(request["image_data"])
         labels = request["labels"]
         confidences = request["confidences"]
-        detected_text = request["detected_text"]
         logger.info("リクエストの前処理完了")
-        return image_data, labels, confidences, detected_text
+        return image_data, labels, confidences
     else:
         error_message = f"予期せぬ入力形式: {request_content_type}"
         logger.error(error_message)
@@ -68,7 +67,7 @@ def input_fn(request_body, request_content_type):
 # 推論の実行
 def predict_fn(input_data, model):
     logger.info("推論の実行開始")
-    image_data, labels, confidences, detected_text = input_data
+    image_data, labels, confidences = input_data
     encoder, decoder = model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -93,7 +92,6 @@ def predict_fn(input_data, model):
     label_indices = decoder.tokenizer.encode(
         " ".join(label_texts), add_special_tokens=False
     )
-    text_indices = decoder.tokenizer.encode(detected_text, add_special_tokens=False)
 
     # ラベルのインデックスをトークンの埋め込みに変換し、デバイスに移動
     label_embeddings = decoder.model.transformer.wte(
@@ -106,15 +104,9 @@ def predict_fn(input_data, model):
         .unsqueeze(1)
         .expand(-1, label_embeddings.size(1))
     )
-    # 検出されたテキストのインデックスをトークンの埋め込みに変換し、デバイスに移動
-    text_embeddings = decoder.model.transformer.wte(
-        torch.tensor(text_indices).to(device)
-    )
 
     # 画像特徴、ラベル埋め込み、信頼度、テキスト埋め込みを結合
-    combined_features = torch.cat(
-        (features, label_embeddings, confidences, text_embeddings), dim=1
-    )
+    combined_features = torch.cat((features, label_embeddings, confidences), dim=1)
     combined_features = decoder.fc(combined_features)
     logger.info("特徴の結合完了")
 

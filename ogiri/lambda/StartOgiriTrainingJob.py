@@ -6,6 +6,7 @@ from datetime import datetime
 import uuid
 from botocore.exceptions import NoCredentialsError, ClientError
 import logging
+from decimal import Decimal
 
 # CloudWatch Logsの設定
 logging.basicConfig(level=logging.INFO)
@@ -55,10 +56,7 @@ def lambda_handler(event, context):
                     continue
 
                 # Rekognitionを使用して画像を分析する
-                dynamodb_labels = None
-
-                # Rekognitionを使用して画像内のテキストを検出
-                detected_text = None
+                rekognition_labels = None
 
                 # 同じ画像が存在するかを確認する
                 labels_response = table.query(
@@ -69,8 +67,8 @@ def lambda_handler(event, context):
 
                 # 同じ画像が存在する場合は、DynamoDBの分析結果を使用する
                 if labels_response["Items"]:
-                    dynamodb_labels = labels_response["Items"][0]["Labels"]
-                    detected_text = labels_response["Items"][0]["DetectedText"]
+                    logger.info(f"{image_key}は画像のみ登録済みです。")
+                    rekognition_labels = labels_response["Items"][0]["Labels"]
                 else:
                     # 画像が存在しない場合は登録する
 
@@ -87,44 +85,24 @@ def lambda_handler(event, context):
                         MaxLabels=10,
                     )
                     rekognition_labels = [
-                        {"Name": label["Name"], "Confidence": label["Confidence"]}
+                        {
+                            "Name": label["Name"],
+                            "Confidence": Decimal(str(label["Confidence"])),
+                        }
                         for label in rekognition_response["Labels"]
                     ]
-
-                    # DynamoDBに保存する形式に変換
-                    dynamodb_labels = [
-                        {
-                            "M": {
-                                "Name": {"S": label["Name"]},
-                                "Confidence": {"N": str(label["Confidence"])},
-                            }
-                        }
-                        for label in rekognition_labels
-                    ]
-
-                    # 画像内のテキストを検出
-                    text_detection_response = rekognition.detect_text(
-                        Image={"S3Object": {"Bucket": bucket, "Name": image_path}}
-                    )
-                    detected_texts = [
-                        text["DetectedText"]
-                        for text in text_detection_response["TextDetections"]
-                    ]
-                    detected_text = " ".join(detected_texts) if detected_texts else None
 
                 # DynamoDBに画像URLと期待結果を保存
                 table = dynamodb.Table("OgiriTrainingDataTable")
                 item = {
-                    "ImageKey": {"S": image_key},
-                    "ExpectedResult": {"S": expected_result},
-                    "Labels": {"L": dynamodb_labels},
+                    "ImageKey": image_key,
+                    "ExpectedResult": expected_result,
+                    "Labels": rekognition_labels,
                 }
 
-                # 画像内にテキストがある場合だけ登録する
-                if detected_text:
-                    item["DetectedText"] = {"S": detected_text}
-
+                table.put_item(Item=item)
                 logger.info(f"{image_key}をDBに登録しました。")
+
             except requests.exceptions.RequestException as e:
                 logger.error(
                     f"{image_url}からの画像のダウロードに失敗しました: {str(e)}"
@@ -141,6 +119,7 @@ def lambda_handler(event, context):
                 "batch_size": "32",
                 "epochs": "10",
                 "learning_rate": "0.001",
+                "sagemaker_submit_directory": "s3://ogiri-training-data-bucket/training-code/training_code.tar.gz",
             },
             AlgorithmSpecification={
                 "TrainingImage": "763104351884.dkr.ecr.ap-northeast-1.amazonaws.com/pytorch-training:1.6.0-cpu-py36-ubuntu16.04",
@@ -176,7 +155,7 @@ def lambda_handler(event, context):
             StoppingCondition={"MaxRuntimeInSeconds": 86400},
             Environment={
                 "DYNAMODB_TABLE_NAME": "OgiriTrainingDataTable",
-                "SAGEMAKER_SUBMIT_DIRECTORY": "s3://ogiri-training-data-bucket/training-code/",
+                "AWS_REGION": "ap-northeast-1",
                 "SAGEMAKER_PROGRAM": "training_script.py",
             },
         )

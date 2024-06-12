@@ -65,12 +65,9 @@ class OgiriDataset(Dataset):
         image = self.transform(image)
         expected_result = item["ExpectedResult"]["S"]
         labels = item["Labels"]["L"]  # Rekognitionのラベル情報
-        detected_text = item.get("DetectedText", {}).get(
-            "S", ""
-        )  # Rekognitionの画像内のテキストを情報
         label_texts, confidences = self.extract_labels_and_confidences(labels)
 
-        return image, expected_result, label_texts, confidences, detected_text
+        return image, expected_result, label_texts, confidences
 
     def extract_labels_and_confidences(self, labels):
         label_texts = [label["M"]["Name"]["S"] for label in labels]
@@ -78,12 +75,30 @@ class OgiriDataset(Dataset):
         return label_texts, confidences
 
 
-# トレーニング関数
+# カスタムcollate関数の定義
+def collate_fn(batch):
+    # 画像データをバッチとして結合
+    images, expected_results, label_texts, confidences = zip(*batch)
+    images = torch.stack(images, 0)
+
+    # パディングを使用して confidences を揃える
+    max_len = max([len(conf) for conf in confidences])
+    padded_confidences = [conf + [0.0] * (max_len - len(conf)) for conf in confidences]
+    padded_confidences = torch.tensor(padded_confidences)
+
+    # その他のデータをリスト形式で保持
+    return images, list(expected_results), list(label_texts), padded_confidences
+
+
+# トレーニング関数の修正
 def train(args):
     # トレーニングデータのディレクトリとDynamoDBテーブル名を設定
     training_data_dir = "/opt/ml/input/data/training"
     dynamodb_table_name = os.environ["DYNAMODB_TABLE_NAME"]
-    dynamodb_client = boto3.client("dynamodb")
+
+    # デフォルトでは、東京リージョンを使用する
+    region_name = os.environ.get("AWS_REGION", "ap-northeast-1")
+    dynamodb_client = boto3.client("dynamodb", region_name=region_name)
 
     batch_size = args.batch_size
     num_epochs = args.epochs
@@ -91,12 +106,15 @@ def train(args):
 
     # データセットとデータローダの設定
     dataset = OgiriDataset(training_data_dir, dynamodb_table_name, dynamodb_client)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn
+    )
 
     # モデルの定義
     encoder = EncoderCNN(EMBEDDING_DIM)
     decoder = DecoderRNN(EMBEDDING_DIM)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     encoder.to(device)
     decoder.to(device)
 
@@ -117,17 +135,49 @@ def train(args):
             expected_results,
             label_texts,
             confidences,
-            detected_text,
         ) in enumerate(dataloader):
             images = images.to(device)
-            confidences = torch.tensor(confidences).to(device)
 
+            # 特徴量を抽出
             features = encoder(images)
+
+            # ラベルテキストをトークナイズしてインデックス化
+            label_indices = [
+                decoder.tokenizer.encode(text, add_special_tokens=False)
+                for sublist in label_texts
+                for text in sublist
+            ]
+            # ラベルのインデックスをトークンの埋め込みに変換し、デバイスに移動
+            label_embeddings = decoder.model.transformer.wte(
+                torch.tensor(label_indices).to(device)
+            )
+
+            # 信頼度をテンソルに変換し、最大ラベル長にパディングしてラベル埋め込みのサイズに拡張
+            max_label_len = label_embeddings.size(1)
+            confidences_tensor = confidences.to(device).unsqueeze(-1)
+            if confidences_tensor.size(1) < max_label_len:
+                padded_confidences = torch.zeros(
+                    confidences_tensor.size(0), max_label_len, device=device
+                )
+                padded_confidences[:, : confidences_tensor.size(1)] = confidences_tensor
+                confidences_tensor = padded_confidences.unsqueeze(-1).expand(
+                    -1, max_label_len, label_embeddings.size(2)
+                )
+            else:
+                confidences_tensor = confidences_tensor.expand(
+                    -1, max_label_len, label_embeddings.size(2)
+                )
+
+            # 特徴量、ラベル埋め込み、信頼度、検出テキスト埋め込みを結合
+            combined_features = torch.cat(
+                (features, label_embeddings, confidences_tensor), dim=1
+            )
+            combined_features = decoder.fc(combined_features)
             optimizer.zero_grad()
 
             # デコーダーの出力を取得
             outputs = decoder(
-                features, expected_results, label_texts, confidences, detected_text
+                combined_features, expected_results, label_texts, confidences
             )
             inputs = decoder.tokenizer(
                 expected_results, return_tensors="pt", padding=True, truncation=True
@@ -139,7 +189,6 @@ def train(args):
             )
             loss.backward()
             optimizer.step()
-
             if i % 100 == 0:
                 logger.info(
                     f"Epoch [{epoch+1}/{num_epochs}], Step [{i}/{len(dataloader)}], Loss: {loss.item():.4f}"

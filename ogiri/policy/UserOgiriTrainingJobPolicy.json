@@ -8,7 +8,6 @@
                 "codecommit:*",
                 "codebuild:*",
                 "codepipeline:*",
-                "iam:PassRole",
                 "iam:CreateRole",
                 "iam:AttachRolePolicy",
                 "iam:PutRolePolicy",
@@ -17,6 +16,11 @@
                 "iam:DeleteRolePolicy"
             ],
             "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": "arn:aws:iam::765231401377:role/SageMakerOgiriTrainingJobRole"
         },
         {
             "Effect": "Allow",
