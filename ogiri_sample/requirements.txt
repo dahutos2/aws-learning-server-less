@@ -1,0 +1,7 @@
+torch==2.0.0                # 利用可能なバージョンを指定
+torchvision==0.15.1         # 画像変換と事前学習済みモデルのためのPyTorch visionライブラリ
+transformers==4.29.2        # 最新の安定版バージョンを指定
+Pillow==9.5.0               # 画像の読み込み、変換、保存のための画像処理ライブラリ
+datasets                    # データセットの管理
+scikit-learn                # 機械学習のためのツール
+sentencepiece               # トークナイザーのためのライブラリ
