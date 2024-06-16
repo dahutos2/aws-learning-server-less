@@ -9,39 +9,30 @@ subprocess.check_call(
 import logging
 import boto3
 import os
-import torch
-import torch.nn as nn
-import torchvision.transforms as transforms
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
 import argparse
-from model import EncoderCNN, DecoderRNN
+import pandas as pd
+import torch
+from torch.utils.data import Dataset
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    Trainer,
+    TrainingArguments,
+    DataCollatorForLanguageModeling,
+)
 
 # CloudWatch Logsの設定
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 定数の定義
-EMBEDDING_DIM = 256
-
 
 # データセットクラスの定義
 class OgiriDataset(Dataset):
-    def __init__(self, training_data_dir, dynamodb_table_name, dynamodb_client):
-        self.training_data_dir = training_data_dir
+    def __init__(self, dynamodb_table_name, dynamodb_client):
         self.dynamodb_table_name = dynamodb_table_name
         self.dynamodb_client = dynamodb_client
         # DynamoDBからデータをロード
         self.data = self._load_data_from_dynamodb()
-        self.transform = transforms.Compose(
-            [
-                transforms.Resize((224, 224)),  # 画像サイズの変更
-                transforms.ToTensor(),  # テンソルに変換
-                transforms.Normalize(
-                    (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
-                ),  # 正規化
-            ]
-        )
         logger.info(f"DynamoDBから{len(self.data)}個のデータをロードしました。")
 
     def _load_data_from_dynamodb(self):
@@ -59,41 +50,58 @@ class OgiriDataset(Dataset):
     def __getitem__(self, idx):
         # 画像とラベルを取得
         item = self.data[idx]
-        image_key = item["ImageKey"]["S"]
-        image_path = os.path.join(self.training_data_dir, image_key)
-        image = Image.open(image_path).convert("RGB")
-        image = self.transform(image)
         expected_result = item["ExpectedResult"]["S"]
-        labels = item["Labels"]["L"]  # Rekognitionのラベル情報
-        label_texts, confidences = self.extract_labels_and_confidences(labels)
+        labels = item["Labels"]["L"]
+        confidences = item["Confidences"]["L"]
+        labels, confidences = self.extract_labels_and_confidences(labels, confidences)
+        elements = "\n".join(
+            [
+                f"- {label}: 信頼度{confidence:.2f}"
+                for label, confidence in zip(labels, confidences)
+            ]
+        )
+        input_text = (
+            "以下は、画像内に写っている要素とその信頼度です。\n"
+            "この情報を元に、一言で面白い大喜利をしてください。\n"
+            f"{elements}\n"
+            "答え: "
+        )
+        return input_text, expected_result
 
-        return image, expected_result, label_texts, confidences
-
-    def extract_labels_and_confidences(self, labels):
-        label_texts = [label["M"]["Name"]["S"] for label in labels]
-        confidences = [float(label["M"]["Confidence"]["N"]) for label in labels]
-        return label_texts, confidences
+    def extract_labels_and_confidences(self, labels, confidences):
+        labels = [label["S"] for label in labels]
+        confidences = [float(confidence["N"]) for confidence in confidences]
+        return labels, confidences
 
 
-# カスタムcollate関数の定義
-def collate_fn(batch):
-    # 画像データをバッチとして結合
-    images, expected_results, label_texts, confidences = zip(*batch)
-    images = torch.stack(images, 0)
+# データの前処理とトークナイズ
+def preprocess_and_tokenize(dataset, tokenizer):
+    inputs, targets = [], []
 
-    # パディングを使用して confidences を揃える
-    max_len = max([len(conf) for conf in confidences])
-    padded_confidences = [conf + [0.0] * (max_len - len(conf)) for conf in confidences]
-    padded_confidences = torch.tensor(padded_confidences)
+    for input_text, expected_result in dataset:
+        inputs.append(input_text)
+        targets.append(expected_result)
 
-    # その他のデータをリスト形式で保持
-    return images, list(expected_results), list(label_texts), padded_confidences
+    def tokenize_function(examples):
+        model_inputs = tokenizer(
+            examples["input"], max_length=512, truncation=True, padding="max_length"
+        )
+        labels = tokenizer(
+            text_target=examples["target"],
+            max_length=128,
+            truncation=True,
+            padding="max_length",
+        )
+        model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+
+    data = pd.DataFrame({"input": inputs, "target": targets})
+    tokenized_data = data.apply(tokenize_function, axis=1)
+    return tokenized_data
 
 
 # トレーニング関数の修正
 def train(args):
-    # トレーニングデータのディレクトリとDynamoDBテーブル名を設定
-    training_data_dir = "/opt/ml/input/data/training"
     dynamodb_table_name = os.environ["DYNAMODB_TABLE_NAME"]
 
     # デフォルトでは、東京リージョンを使用する
@@ -104,99 +112,56 @@ def train(args):
     num_epochs = args.epochs
     learning_rate = args.learning_rate
 
-    # データセットとデータローダの設定
-    dataset = OgiriDataset(training_data_dir, dynamodb_table_name, dynamodb_client)
-    dataloader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn
+    # データセットとトークナイズ
+    dataset = OgiriDataset(dynamodb_table_name, dynamodb_client)
+    tokenizer = AutoTokenizer.from_pretrained(
+        "rinna/japanese-gpt2-medium", use_fast=False
     )
+    tokenizer.do_lower_case = True
+    tokenized_data = preprocess_and_tokenize(dataset, tokenizer)
+
+    logger.info("データセットとトークナイズの読み込みを終了しました。")
 
     # モデルの定義
-    encoder = EncoderCNN(EMBEDDING_DIM)
-    decoder = DecoderRNN(EMBEDDING_DIM)
+    model = AutoModelForCausalLM.from_pretrained("rinna/japanese-gpt2-medium")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
 
-    encoder.to(device)
-    decoder.to(device)
+    logger.info("モデルの読み込みを終了しました。")
 
-    # 損失関数の定義
-    criterion = nn.CrossEntropyLoss()
-
-    # 最適化関数の定義
-    optimizer = torch.optim.Adam(
-        list(encoder.parameters()) + list(decoder.parameters()), lr=learning_rate
+    # DataCollatorの設定
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,
     )
 
-    # トレーニング開始
-    logger.info("トレーニングを開始します")
-    for epoch in range(num_epochs):
-        logger.info(f"Epoch {epoch+1}/{num_epochs} started")
-        for i, (
-            images,
-            expected_results,
-            label_texts,
-            confidences,
-        ) in enumerate(dataloader):
-            images = images.to(device)
+    # トレーニングの設定
+    training_args = TrainingArguments(
+        output_dir="/opt/ml/checkpoints",
+        overwrite_output_dir=True,
+        num_train_epochs=num_epochs,
+        per_device_train_batch_size=batch_size,
+        learning_rate=learning_rate,
+        save_steps=10_000,
+        save_total_limit=2,
+    )
 
-            # 特徴量を抽出
-            features = encoder(images)
+    # トレーナーの初期化
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_data,
+        eval_dataset=tokenized_data,  # データが少ない場合、trainと同じデータを使用
+        data_collator=data_collator,
+    )
 
-            # ラベルテキストをトークナイズしてインデックス化
-            label_indices = [
-                decoder.tokenizer.encode(text, add_special_tokens=False)
-                for sublist in label_texts
-                for text in sublist
-            ]
-            # ラベルのインデックスをトークンの埋め込みに変換し、デバイスに移動
-            label_embeddings = decoder.model.transformer.wte(
-                torch.tensor(label_indices).to(device)
-            )
+    logger.info("トレーニングを開始しました。")
 
-            # 信頼度をテンソルに変換し、最大ラベル長にパディングしてラベル埋め込みのサイズに拡張
-            max_label_len = label_embeddings.size(1)
-            confidences_tensor = confidences.to(device).unsqueeze(-1)
-            if confidences_tensor.size(1) < max_label_len:
-                padded_confidences = torch.zeros(
-                    confidences_tensor.size(0), max_label_len, device=device
-                )
-                padded_confidences[:, : confidences_tensor.size(1)] = confidences_tensor
-                confidences_tensor = padded_confidences.unsqueeze(-1).expand(
-                    -1, max_label_len, label_embeddings.size(2)
-                )
-            else:
-                confidences_tensor = confidences_tensor.expand(
-                    -1, max_label_len, label_embeddings.size(2)
-                )
-
-            # 特徴量、ラベル埋め込み、信頼度、検出テキスト埋め込みを結合
-            combined_features = torch.cat(
-                (features, label_embeddings, confidences_tensor), dim=1
-            )
-            combined_features = decoder.fc(combined_features)
-            optimizer.zero_grad()
-
-            # デコーダーの出力を取得
-            outputs = decoder(
-                combined_features, expected_results, label_texts, confidences
-            )
-            inputs = decoder.tokenizer(
-                expected_results, return_tensors="pt", padding=True, truncation=True
-            ).input_ids.to(device)
-
-            # 損失を計算
-            loss = criterion(
-                outputs.logits.view(-1, outputs.logits.size(-1)), inputs.view(-1)
-            )
-            loss.backward()
-            optimizer.step()
-            if i % 100 == 0:
-                logger.info(
-                    f"Epoch [{epoch+1}/{num_epochs}], Step [{i}/{len(dataloader)}], Loss: {loss.item():.4f}"
-                )
+    trainer.train()
 
     # モデルの保存
-    torch.save(encoder.state_dict(), "/opt/ml/model/encoder.ckpt")
-    torch.save(decoder.state_dict(), "/opt/ml/model/decoder.ckpt")
+    model.save_pretrained("/opt/ml/model")
+    tokenizer.save_pretrained("/opt/ml/model")
     logger.info("トレーニングが完了し、モデルを保存しました")
 
 

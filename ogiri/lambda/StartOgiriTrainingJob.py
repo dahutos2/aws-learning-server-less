@@ -7,6 +7,7 @@ import uuid
 from botocore.exceptions import NoCredentialsError, ClientError
 import logging
 from decimal import Decimal
+from googletrans import Translator
 
 # CloudWatch Logsの設定
 logging.basicConfig(level=logging.INFO)
@@ -17,6 +18,13 @@ rekognition = boto3.client("rekognition")
 dynamodb = boto3.resource("dynamodb")
 sagemaker = boto3.client("sagemaker")
 events = boto3.client("events")
+
+# Google翻訳のインスタンスを作成
+translator = Translator()
+
+
+def translate_labels_to_japanese(labels):
+    return [translator.translate(label, src="en", dest="ja").text for label in labels]
 
 
 def lambda_handler(event, context):
@@ -56,7 +64,8 @@ def lambda_handler(event, context):
                     continue
 
                 # Rekognitionを使用して画像を分析する
-                rekognition_labels = None
+                labels = []
+                confidences = []
 
                 # 同じ画像が存在するかを確認する
                 labels_response = table.query(
@@ -65,10 +74,13 @@ def lambda_handler(event, context):
                     )
                 )
 
+                items = labels_response.get("Items", [])
+
                 # 同じ画像が存在する場合は、DynamoDBの分析結果を使用する
-                if labels_response["Items"]:
+                if items:
                     logger.info(f"{image_key}は画像のみ登録済みです。")
-                    rekognition_labels = labels_response["Items"][0]["Labels"]
+                    labels = items[0]["Labels"]
+                    confidences = items[0].get("Confidences", [])
                 else:
                     # 画像が存在しない場合は登録する
 
@@ -84,20 +96,24 @@ def lambda_handler(event, context):
                         Image={"S3Object": {"Bucket": bucket, "Name": image_path}},
                         MaxLabels=10,
                     )
-                    rekognition_labels = [
-                        {
-                            "Name": label["Name"],
-                            "Confidence": Decimal(str(label["Confidence"])),
-                        }
+                    en_labels = [
+                        label["Name"] for label in rekognition_response["Labels"]
+                    ]
+                    confidences = [
+                        Decimal(str(label["Confidence"]))
                         for label in rekognition_response["Labels"]
                     ]
+
+                    # ラベルを日本語に翻訳
+                    labels = translate_labels_to_japanese(en_labels)
 
                 # DynamoDBに画像URLと期待結果を保存
                 table = dynamodb.Table("OgiriTrainingDataTable")
                 item = {
                     "ImageKey": image_key,
                     "ExpectedResult": expected_result,
-                    "Labels": rekognition_labels,
+                    "Labels": labels,
+                    "Confidences": confidences,
                 }
 
                 table.put_item(Item=item)
