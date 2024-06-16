@@ -88,7 +88,7 @@ def preprocess_and_tokenize(dataset, tokenizer):
         )
         labels = tokenizer(
             text_target=examples["target"],
-            max_length=128,
+            max_length=512,
             truncation=True,
             padding="max_length",
         )
@@ -133,6 +133,7 @@ def train(args):
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False,
+        pad_to_multiple_of=8,
     )
 
     # トレーニングの設定
@@ -141,9 +142,13 @@ def train(args):
         overwrite_output_dir=True,
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=8,
         learning_rate=learning_rate,
-        save_steps=10_000,
-        save_total_limit=2,
+        logging_dir="/opt/ml/logs",
+        logging_steps=500,
+        save_steps=1000,
+        save_total_limit=5,
+        fp16=True if torch.cuda.is_available() else False,
     )
 
     # トレーナーの初期化
@@ -168,8 +173,8 @@ def train(args):
 if __name__ == "__main__":
     # コマンドライン引数の解析
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--learning_rate", type=float, default=0.001)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--learning_rate", type=float, default=5e-5)
     args = parser.parse_args()
     train(args)

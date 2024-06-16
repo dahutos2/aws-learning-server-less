@@ -65,7 +65,7 @@ def preprocess_and_tokenize(dataset, tokenizer):
         )
         labels = tokenizer(
             examples["target"],
-            max_length=128,
+            max_length=512,
             truncation=True,
             padding="max_length",
         )
@@ -79,17 +79,12 @@ def preprocess_and_tokenize(dataset, tokenizer):
 
 # トレーニング関数の修正
 def train():
-    # OpenMP競合の警告を回避
-    import os
-
-    os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
-
     # トレーニングデータのCSVファイルパスを設定
     csv_file_path = "./augmented_data.csv"
 
     batch_size = 8
     num_epochs = 3
-    learning_rate = 0.001
+    learning_rate = 0.00005
 
     print("データセットとトークナイズを開始しました。")
 
@@ -114,6 +109,7 @@ def train():
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False,
+        pad_to_multiple_of=8,
     )
 
     # トレーニングの設定
@@ -122,9 +118,13 @@ def train():
         overwrite_output_dir=True,
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=8,
         learning_rate=learning_rate,
-        save_steps=10_000,
-        save_total_limit=2,
+        logging_dir="./logs",
+        logging_steps=500,
+        save_steps=1000,
+        save_total_limit=5,
+        fp16=True if torch.cuda.is_available() else False,
     )
 
     # トレーナーの初期化
