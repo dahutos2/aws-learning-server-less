@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import shutil
 
 # requirements.txtをインストール
 subprocess.check_call(
@@ -31,6 +32,7 @@ class OgiriDataset(Dataset):
     def __init__(self, dynamodb_table_name, dynamodb_client):
         self.dynamodb_table_name = dynamodb_table_name
         self.dynamodb_client = dynamodb_client
+
         # DynamoDBからデータをロード
         self.data = self._load_data_from_dynamodb()
         logger.info(f"DynamoDBから{len(self.data)}個のデータをロードしました。")
@@ -77,18 +79,17 @@ class OgiriDataset(Dataset):
 # データの前処理とトークナイズ
 def preprocess_and_tokenize(dataset, tokenizer):
     inputs, targets = [], []
-
     for input_text, expected_result in dataset:
         inputs.append(input_text)
         targets.append(expected_result)
 
     def tokenize_function(examples):
         model_inputs = tokenizer(
-            examples["input"], max_length=512, truncation=True, padding="max_length"
+            examples["input"], max_length=128, truncation=True, padding="max_length"
         )
         labels = tokenizer(
             text_target=examples["target"],
-            max_length=512,
+            max_length=128,
             truncation=True,
             padding="max_length",
         )
@@ -119,14 +120,12 @@ def train(args):
     )
     tokenizer.do_lower_case = True
     tokenized_data = preprocess_and_tokenize(dataset, tokenizer)
-
     logger.info("データセットとトークナイズの読み込みを終了しました。")
 
     # モデルの定義
     model = AutoModelForCausalLM.from_pretrained("rinna/japanese-gpt2-medium")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-
     logger.info("モデルの読み込みを終了しました。")
 
     # DataCollatorの設定
@@ -161,19 +160,22 @@ def train(args):
     )
 
     logger.info("トレーニングを開始しました。")
-
     trainer.train()
 
     # モデルの保存
     model.save_pretrained("/opt/ml/model")
     tokenizer.save_pretrained("/opt/ml/model")
+
+    # inference.py と requirements.txt を /opt/ml/model ディレクトリにコピー
+    shutil.copy("/opt/ml/code/inference.py", "/opt/ml/model/inference.py")
+    shutil.copy("/opt/ml/code/requirements.txt", "/opt/ml/model/requirements.txt")
     logger.info("トレーニングが完了し、モデルを保存しました")
 
 
 if __name__ == "__main__":
     # コマンドライン引数の解析
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
     args = parser.parse_args()

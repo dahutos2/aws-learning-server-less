@@ -1,54 +1,77 @@
 version: 0.2
+
 env:
   variables:
     FLUTTER_SDK: /opt/flutter
     ANDROID_SDK_ROOT: /usr/local/android-sdk
+    ANDROID_HOME: /usr/local/android-sdk
     GRADLE_USER_HOME: /root/.gradle
     PUB_CACHE: /root/.pub-cache
     S3_BUCKET: ogiri-ai-builds
     FLUTTER_VERSION: 3.13.4
-    ANDROID_SDK_VERSION: android-30
-    BUILD_TOOLS_VERSION: 30.0.3
+    ANDROID_SDK_VERSION: 31
+    BUILD_TOOLS_VERSION: 31.0.0
 phases:
   install:
+    runtime-versions:
+      java: corretto11
     commands:
+      # 必要なパッケージのインストール
       - apt-get update
-      - apt-get install -y openjdk-11-jdk
+      - apt-get install -y wget unzip
+      # Flutter SDK のインストール
       - |
         if [ ! -d "$FLUTTER_SDK/flutter" ]; then
           mkdir -p $FLUTTER_SDK
-          aws s3 cp s3://$S3_BUCKET/flutter/flutter_$FLUTTER_VERSION.tar.xz $FLUTTER_SDK/flutter.tar.xz || curl -s https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_$FLUTTER_VERSION-stable.tar.xz -o $FLUTTER_SDK/flutter.tar.xz
+          if aws s3 ls s3://$S3_BUCKET/flutter/flutter_$FLUTTER_VERSION.tar.xz; then
+            aws s3 cp s3://$S3_BUCKET/flutter/flutter_$FLUTTER_VERSION.tar.xz $FLUTTER_SDK/flutter.tar.xz
+          else
+            curl -s https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_$FLUTTER_VERSION-stable.tar.xz -o $FLUTTER_SDK/flutter.tar.xz
+            aws s3 cp $FLUTTER_SDK/flutter.tar.xz s3://$S3_BUCKET/flutter/flutter_$FLUTTER_VERSION.tar.xz
+          fi
           tar -xf $FLUTTER_SDK/flutter.tar.xz -C $FLUTTER_SDK
           rm $FLUTTER_SDK/flutter.tar.xz
-          aws s3 cp $FLUTTER_SDK/flutter.tar.xz s3://$S3_BUCKET/flutter/flutter_$FLUTTER_VERSION.tar.xz
         fi
+      - export PATH="$FLUTTER_SDK/flutter/bin:$PATH"
+      # Android SDK のインストールと設定
       - |
-        if [ ! -d "$ANDROID_SDK_ROOT/platforms/$ANDROID_SDK_VERSION" ]; then
-          curl -s https://dl.google.com/android/repository/commandlinetools-linux-7583922_latest.zip -o cmdline-tools.zip
-          unzip cmdline-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
-          yes | $ANDROID_SDK_ROOT/cmdline-tools/tools/bin/sdkmanager --licenses
-          $ANDROID_SDK_ROOT/cmdline-tools/tools/bin/sdkmanager "platform-tools" "platforms;$ANDROID_SDK_VERSION" "build-tools;$BUILD_TOOLS_VERSION"
-          aws s3 sync $ANDROID_SDK_ROOT/ s3://$S3_BUCKET/android-sdk/
-        else
-          aws s3 sync s3://$S3_BUCKET/android-sdk/ $ANDROID_SDK_ROOT/
+        if [ ! -d "$ANDROID_SDK_ROOT/platforms/android-$ANDROID_SDK_VERSION" ]; then
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools/latest
+          wget https://dl.google.com/android/repository/commandlinetools-linux-7583922_latest.zip -O cmdline-tools.zip
+          unzip cmdline-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools/latest
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-$ANDROID_SDK_VERSION" "build-tools;$BUILD_TOOLS_VERSION"
         fi
+      - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+      - echo "ANDROID_SDK_ROOT is set to $ANDROID_SDK_ROOT"
+      - echo "PATH is set to $PATH"
+
+      # Gradleラッパーのチェックおよびダウンロード
       - |
         if [ ! -d "$GRADLE_USER_HOME/wrapper" ]; then
           mkdir -p $GRADLE_USER_HOME/wrapper
-          aws s3 sync s3://$S3_BUCKET/gradle/wrapper $GRADLE_USER_HOME/wrapper
+          if aws s3 ls s3://$S3_BUCKET/gradle/wrapper/; then
+            aws s3 sync s3://$S3_BUCKET/gradle/wrapper/ $GRADLE_USER_HOME/wrapper
+          fi
         fi
+      # Gradleキャッシュのチェックおよびダウンロード
       - |
         if [ ! -d "$GRADLE_USER_HOME/caches" ]; then
           mkdir -p $GRADLE_USER_HOME/caches
-          aws s3 sync s3://$S3_BUCKET/gradle/caches $GRADLE_USER_HOME/caches
+          if aws s3 ls s3://$S3_BUCKET/gradle/caches/; then
+            aws s3 sync s3://$S3_BUCKET/gradle/caches/ $GRADLE_USER_HOME/caches
+          fi
         fi
-      - export PATH="$FLUTTER_SDK/flutter/bin:$PATH"
+      - git config --global --add safe.directory /opt/flutter/flutter
   pre_build:
     commands:
-      - flutter doctor
+      # Flutterの状態を確認
+      - flutter doctor -v
       - flutter pub get
   build:
     commands:
+      - echo "Starting flutter build process"
+      - flutter doctor -v
       - flutter build apk --release
   post_build:
     commands:
@@ -58,9 +81,8 @@ phases:
       - aws s3 sync $ANDROID_SDK_ROOT/ s3://$S3_BUCKET/android-sdk/
 artifacts:
   files:
-    - app-release.apk
+    - build/app/outputs/flutter-apk/app-release.apk
   discard-paths: yes
-  base-directory: build/app/outputs/flutter-apk
 cache:
   paths:
     - $PUB_CACHE/**

@@ -1,0 +1,15 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "execute-api:Invoke",
+            "Resource": [
+                "arn:aws:execute-api:ap-northeast-1:765231401377:fws3c86qjk/prod/POST/presigned-url",
+                "arn:aws:execute-api:ap-northeast-1:765231401377:fws3c86qjk/prod/POST/result",
+                "arn:aws:execute-api:ap-northeast-1:765231401377:fws3c86qjk/prod/GET/results"
+            ]
+        }
+    ]
+}

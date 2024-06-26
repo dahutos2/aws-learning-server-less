@@ -1,8 +1,9 @@
 import json
 import boto3
-import base64
 from botocore.exceptions import ClientError
 import logging
+from googletrans import Translator
+from decimal import Decimal
 
 # CloudWatch Logs の設定
 logging.basicConfig(level=logging.INFO)
@@ -13,91 +14,89 @@ dynamodb = boto3.resource("dynamodb")
 rekognition = boto3.client("rekognition")
 sagemaker_runtime = boto3.client("sagemaker-runtime")
 
+# Google翻訳のインスタンスを作成
+translator = Translator()
+MAX_LENGTH = 3
+
+
+def translate_labels_to_japanese(labels):
+    return [translator.translate(label, src="en", dest="ja").text for label in labels]
+
 
 def lambda_handler(event, context):
     try:
-        # 画像データを取得
+        # リクエストボディからファイル名を取得
         body = json.loads(event["body"])
-        image_data = base64.b64decode(body["image"])
         image_key = body["filename"]
 
         # 公開する画像のURLを生成
-        cloudfront_domain = "your-cloudfront-domain.cloudfront.net"
+        cloudfront_domain = "d1p47yp2l3zlz9.cloudfront.net"
         image_url = f"https://{cloudfront_domain}/{image_key}"
 
         # DynamoDBに既にデータが存在するか確認
         table = dynamodb.Table("OgiriResultsTable")
+
         response = table.query(
             KeyConditionExpression=boto3.dynamodb.conditions.Key("ImageKey").eq(
                 image_key
             )
         )
+
         items = response.get("Items", [])
         labels = []
         confidences = []
-        detected_text = ""
 
         if items:
             # 既に存在するデータがあれば、最初のアイテムのラベルを使用
             labels = items[0]["Labels"]
-            confidences = items[0].get("Confidences", [])
-            detected_text = items[0].get("DetectedText", "")
+            confidences = [
+                float(confidence) for confidence in items[0].get("Confidences", [])
+            ]
         else:
-            # 画像をS3に保存
-            bucket_name = "ogiri-images-bucket"
-            s3.put_object(Bucket=bucket_name, Key=image_key, Body=image_data)
-
             # Rekognitionを使用して画像を分析
             rekognition_response = rekognition.detect_labels(
-                Image={"S3Object": {"Bucket": bucket_name, "Name": image_key}},
+                Image={
+                    "S3Object": {"Bucket": "ogiri-images-bucket", "Name": image_key}
+                },
                 MaxLabels=10,
             )
-            labels = [label["Name"] for label in rekognition_response["Labels"]]
+            en_labels = [label["Name"] for label in rekognition_response["Labels"]]
             confidences = [
-                label["Confidence"] for label in rekognition_response["Labels"]
+                float(label["Confidence"]) for label in rekognition_response["Labels"]
             ]
 
-            # 画像内のテキストを検出
-            text_detection_response = rekognition.detect_text(
-                Image={"S3Object": {"Bucket": bucket_name, "Name": image_key}}
-            )
-            detected_texts = [
-                text["DetectedText"]
-                for text in text_detection_response["TextDetections"]
-            ]
-            detected_text = " ".join(detected_texts) if detected_texts else ""
+            # ラベルを日本語に翻訳
+            labels = translate_labels_to_japanese(en_labels)
 
         # SageMakerエンドポイントを呼び出して予測
         sagemaker_input = {
-            "image": base64.b64encode(image_data).decode("utf-8"),
-            "labels": labels,
-            "confidences": confidences,
-            "detected_text": detected_text,
+            "labels": labels[:MAX_LENGTH],
+            "confidences": confidences[:MAX_LENGTH],
         }
+
         response = sagemaker_runtime.invoke_endpoint(
             EndpointName="ogiri-endpoint",
             ContentType="application/json",
             Body=json.dumps(sagemaker_input),
         )
-
         result = json.loads(response["Body"].read().decode())
+
+        # 結果を整形
+        result_text = result.get("generated_text", "")
 
         # DynamoDBに保存
         item = {
-            "ImageKey": {"S": image_key},
-            "ImageUrl": {"S": image_url},
-            "Labels": {"L": [{"S": label} for label in labels]},
-            "Confidences": {"L": [{"N": str(conf)} for conf in confidences]},
-            "Result": {"S": json.dumps(result)},
+            "ImageKey": image_key,
+            "ImageUrl": image_url,
+            "Labels": labels[:MAX_LENGTH],
+            "Confidences": [Decimal(confidence) for confidence in confidences][
+                :MAX_LENGTH
+            ],
+            "Result": result_text,
         }
 
-        if detected_text:
-            item["DetectedText"] = {"S": detected_text}
-
         table.put_item(Item=item)
-
-        return {"statusCode": 200, "body": json.dumps({"result": result})}
-
+        return {"statusCode": 200, "body": json.dumps({"Result": result_text})}
     except ClientError as e:
         logger.error(f"クライアントエラー: {str(e)}")
         return {"statusCode": 500, "body": json.dumps(f"クライアントエラー: {str(e)}")}

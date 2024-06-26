@@ -9,9 +9,11 @@ import logging
 from decimal import Decimal
 from googletrans import Translator
 
+
 # CloudWatch Logsの設定
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 s3 = boto3.client("s3")
 rekognition = boto3.client("rekognition")
@@ -19,8 +21,10 @@ dynamodb = boto3.resource("dynamodb")
 sagemaker = boto3.client("sagemaker")
 events = boto3.client("events")
 
+
 # Google翻訳のインスタンスを作成
 translator = Translator()
+MAX_LENGTH = 3
 
 
 def translate_labels_to_japanese(labels):
@@ -46,11 +50,10 @@ def lambda_handler(event, context):
 
         # DynamoDBに学習用のデータを登録する
         table = dynamodb.Table("OgiriTrainingDataTable")
-
         logger.info("学習用のデータの登録を開始します。")
+
         for row in csv_reader:
             image_url, expected_result = row
-
             try:
                 image_key = image_url.split("/")[-1]
                 image_path = f"images/{image_key}"  # images ディレクトリに配置
@@ -59,6 +62,7 @@ def lambda_handler(event, context):
                 response = table.get_item(
                     Key={"ImageKey": image_key, "ExpectedResult": expected_result}
                 )
+
                 if "Item" in response:
                     logger.info(f"{image_url}は既に処理されています。")
                     continue
@@ -73,7 +77,6 @@ def lambda_handler(event, context):
                         image_key
                     )
                 )
-
                 items = labels_response.get("Items", [])
 
                 # 同じ画像が存在する場合は、DynamoDBの分析結果を使用する
@@ -83,7 +86,6 @@ def lambda_handler(event, context):
                     confidences = items[0].get("Confidences", [])
                 else:
                     # 画像が存在しない場合は登録する
-
                     # グローバルなURLから画像をダウンロード
                     image_data = requests.get(image_url).content
 
@@ -112,8 +114,8 @@ def lambda_handler(event, context):
                 item = {
                     "ImageKey": image_key,
                     "ExpectedResult": expected_result,
-                    "Labels": labels,
-                    "Confidences": confidences,
+                    "Labels": labels[:MAX_LENGTH],
+                    "Confidences": confidences[:MAX_LENGTH],
                 }
 
                 table.put_item(Item=item)
@@ -132,9 +134,9 @@ def lambda_handler(event, context):
         response = sagemaker.create_training_job(
             TrainingJobName=training_job_name,
             HyperParameters={
-                "batch_size": "32",
-                "epochs": "10",
-                "learning_rate": "0.001",
+                "batch_size": "4",
+                "epochs": "3",
+                "learning_rate": "0.00005",
                 "sagemaker_submit_directory": "s3://ogiri-training-data-bucket/training-code/training_code.tar.gz",
             },
             AlgorithmSpecification={
@@ -164,7 +166,7 @@ def lambda_handler(event, context):
                 "S3OutputPath": "s3://ogiri-training-data-bucket/output/"
             },
             ResourceConfig={
-                "InstanceType": "ml.m5.large",
+                "InstanceType": "ml.m6i.2xlarge",
                 "InstanceCount": 1,
                 "VolumeSizeInGB": 50,
             },
@@ -175,7 +177,6 @@ def lambda_handler(event, context):
                 "SAGEMAKER_PROGRAM": "training_script.py",
             },
         )
-
         logger.info("トレーニングジョブの開始に成功しました。")
 
         # CloudWatch Event ルールを動的に作成
@@ -209,7 +210,6 @@ def lambda_handler(event, context):
         logger.info(
             f"CloudWatch Event Rule {rule_name} を作成し、Lambdaターゲットを設定しました。"
         )
-
         return {
             "statusCode": 200,
             "body": json.dumps("トレーニングジョブの開始に成功しました。"),

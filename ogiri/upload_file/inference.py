@@ -3,7 +3,7 @@ import sys
 
 # requirements.txtをインストール
 subprocess.check_call(
-    [sys.executable, "-m", "pip", "install", "-r", "/opt/ml/code/requirements.txt"]
+    [sys.executable, "-m", "pip", "install", "-r", "/opt/ml/model/requirements.txt"]
 )
 
 import logging
@@ -35,6 +35,7 @@ def input_fn(request_body, request_content_type):
         request = json.loads(request_body)
         labels = request["labels"]
         confidences = request["confidences"]
+
         # 入力形式を学習時と同様に整形
         elements = "\n".join(
             [
@@ -61,9 +62,10 @@ def predict_fn(input_data, model):
     logger.info("推論の実行開始")
     tokenizer, model = model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # トークナイザーで入力テキストをトークン化
     inputs = tokenizer(
-        input_data, return_tensors="pt", padding=True, truncation=True, max_length=512
+        input_data, return_tensors="pt", padding=True, truncation=True, max_length=128
     )
     inputs = {key: val.to(device) for key, val in inputs.items()}
 
@@ -82,8 +84,10 @@ def predict_fn(input_data, model):
 
     # 出力トークンをデコードしてテキストに変換
     response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
     # 「答え:」以降の部分を抽出して返す
     response = response.split("答え:")[1].strip() if "答え:" in response else response
+
     logger.info("推論の実行完了")
     return response
 

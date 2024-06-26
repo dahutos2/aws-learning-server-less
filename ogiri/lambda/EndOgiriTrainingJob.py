@@ -4,8 +4,8 @@ import logging
 
 # CloudWatch Logsの設定
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
+logger = logging.getLogger(__name__)
 sagemaker = boto3.client("sagemaker")
 
 
@@ -30,10 +30,6 @@ def lambda_handler(event, context):
             PrimaryContainer={
                 "Image": "763104351884.dkr.ecr.ap-northeast-1.amazonaws.com/pytorch-inference:2.0.0-gpu-py310",
                 "ModelDataUrl": f"s3://ogiri-training-data-bucket/output/{training_job_name}/output/model.tar.gz",
-                "Environment": {
-                    "SAGEMAKER_SUBMIT_DIRECTORY": "s3://ogiri-training-data-bucket/training-code/training_code.tar.gz"
-                },
-                "entry_point": "inference.py",
             },
             ExecutionRoleArn="arn:aws:iam::765231401377:role/SageMakerOgiriTrainingJobRole",
         )
@@ -41,14 +37,17 @@ def lambda_handler(event, context):
 
         # エンドポイント構成の作成
         endpoint_config_name = "ogiri-endpoint-config"
+
         sagemaker.create_endpoint_config(
             EndpointConfigName=endpoint_config_name,
             ProductionVariants=[
                 {
                     "VariantName": "AllTraffic",
                     "ModelName": model_name,
-                    "InstanceType": "ml.m5.large",
+                    "InstanceType": "ml.g4dn.2xlarge",
                     "InitialInstanceCount": 1,
+                    "ModelDataDownloadTimeoutInSeconds": 240,
+                    "ContainerStartupHealthCheckTimeoutInSeconds": 240,
                 }
             ],
         )
@@ -56,6 +55,7 @@ def lambda_handler(event, context):
 
         # エンドポイントの作成
         endpoint_name = "ogiri-endpoint"
+
         sagemaker.create_endpoint(
             EndpointName=endpoint_name, EndpointConfigName=endpoint_config_name
         )
