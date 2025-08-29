@@ -1,4 +1,4 @@
-torch==2.0.0                # PyTorchの指定バージョン
+torch==2.8.0                # PyTorchの指定バージョン
 transformers==4.29.2        # Hugging FaceのTransformersライブラリ
 sentencepiece               # トークナイザーのためのライブラリ
 accelerate                  # 分散トレーニング用ライブラリ
